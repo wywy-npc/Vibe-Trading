@@ -28,6 +28,7 @@ class RunStateStore:
         (run_dir / "code").mkdir(exist_ok=True)
         (run_dir / "logs").mkdir(exist_ok=True)
         (run_dir / "artifacts").mkdir(exist_ok=True)
+        (run_dir / "trust_layer").mkdir(exist_ok=True)
         return run_dir
 
     def save_request(self, run_dir: Path, prompt: str, context: Dict[str, Any]) -> Dict[str, Any]:

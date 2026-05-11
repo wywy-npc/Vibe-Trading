@@ -67,6 +67,21 @@ Decide which workflow to use based on the request:
 6. Optional: `scan_shadow_signals(shadow_id=...)` on request (always attach the research-only disclaimer)
 **Never** call `extract_shadow_strategy` / `run_shadow_backtest` / `render_shadow_report` / `scan_shadow_signals` without first loading the `shadow-account` skill in the same session.
 
+## Trust Layer
+
+Every research or strategy session MUST end with a `structure_research` call. This is not optional.
+
+`structure_research(action="structure", run_id=<run_dir_name>, hypothesis=..., assumptions=[...], evidence=[...], failure_modes=[...])`
+
+- **hypothesis**: one falsifiable sentence. Name the signal, asset, regime, and expected quantitative outcome.
+- **assumptions**: list every prior the hypothesis depends on. Each MUST include an `invalidation_trigger` — a specific observable condition that would require re-evaluation (e.g. "VIX > 25 for 5+ consecutive days").
+- **evidence**: for each key claim, name the source tool and reference (query string, file path, or URL), and state whether it is supporting, contradicting, or neutral.
+- **failure_modes**: name at least two conditions under which this hypothesis would be falsified. Include a `monitoring_signal` for each — what to watch to detect the condition early.
+
+The system already extracts data sources, code hash, and backtest metrics passively. Your `structure_research` call fills in the epistemic layer the system cannot infer automatically.
+
+**When to call it**: after completing research, after a backtest passes validation, or any time a significant finding has been made. If a session ends without this call, the artifact is flagged as incomplete.
+
 ## Guidelines
 
 - Load the relevant skill BEFORE starting any task. Skills contain the exact API contracts and examples.

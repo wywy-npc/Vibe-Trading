@@ -28,6 +28,7 @@ from src.agent.trace import TraceWriter
 from src.core.state import RunStateStore
 from src.providers.chat import ChatLLM
 from src.tools.background_tools import get_background_manager
+from src.trust_layer.builder import TrustLayerBuilder
 
 RUNS_DIR = Path(__file__).resolve().parents[2] / "runs"
 TOKEN_THRESHOLD = int(os.getenv("TOKEN_THRESHOLD", "40000"))
@@ -333,6 +334,12 @@ class AgentLoop:
             run_dir = state_store.create_run_dir(RUNS_DIR)
             self.memory.run_dir = str(run_dir)
 
+        self._trust_layer = TrustLayerBuilder(
+            run_id=run_dir.name,
+            run_dir=run_dir,
+            session_id=session_id,
+        )
+
         state_store.save_request(run_dir, user_message, {"session_id": session_id})
 
         context = ContextBuilder(self.registry, self.memory,
@@ -449,12 +456,21 @@ class AgentLoop:
         trace.write({"type": "end", "status": final_status, "iterations": iteration})
         trace.close()
 
+        # Write passive trust layer artifact (always — even without structure_research call)
+        trust_layer_path = None
+        if hasattr(self, "_trust_layer"):
+            try:
+                trust_layer_path = str(self._trust_layer.finalize())
+            except Exception as _tl_exc:
+                logger.debug("Trust layer finalize failed: %s", _tl_exc)
+
         return {
             "status": final_status,
             "run_dir": str(run_dir),
             "run_id": run_dir.name,
             "content": final_content,
             "react_trace": react_trace,
+            "trust_layer_path": trust_layer_path,
         }
 
     # -- Tool execution with read/write batching --------------------------------
@@ -670,6 +686,13 @@ class AgentLoop:
         success = _is_tool_success(result)
         if success:
             self._called_ok.add(tc.name)
+
+        # Passive trust layer extraction — runs on every successful tool call
+        if success and hasattr(self, "_trust_layer"):
+            try:
+                self._trust_layer.on_tool_result(tc.name, tc.arguments, result)
+            except Exception as _tl_exc:
+                logger.debug("Trust layer extraction error for %s: %s", tc.name, _tl_exc)
 
         status = "ok" if success else "error"
         truncated = result[:TOOL_RESULT_LIMIT]
