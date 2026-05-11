@@ -17,6 +17,12 @@ const Correlation = lazy(() =>
   import("@/pages/Correlation").then((m) => ({ default: m.Correlation })),
 );
 
+// Office pages
+const Floor = lazy(() => import("@/pages/office/Floor").then((m) => ({ default: m.Floor })));
+const Inbox = lazy(() => import("@/pages/office/Inbox").then((m) => ({ default: m.Inbox })));
+const Book = lazy(() => import("@/pages/office/Book").then((m) => ({ default: m.Book })));
+const Mandates = lazy(() => import("@/pages/office/Mandates").then((m) => ({ default: m.Mandates })));
+
 function PageLoader() {
   return (
     <div className="flex h-[60vh] items-center justify-center text-muted-foreground">
@@ -37,8 +43,13 @@ export const router = createBrowserRouter([
   {
     element: <Layout />,
     children: [
-      { path: "/", element: wrap(Home) },
+      { path: "/", element: wrap(Floor) },
+      { path: "/office/floor", element: wrap(Floor) },
+      { path: "/office/inbox", element: wrap(Inbox) },
+      { path: "/office/book", element: wrap(Book) },
+      { path: "/office/mandates", element: wrap(Mandates) },
       { path: "/agent", element: wrap(Agent) },
+      { path: "/research", element: wrap(Home) },
       { path: "/settings", element: wrap(Settings) },
       { path: "/runs/:runId", element: wrap(RunDetail) },
       { path: "/compare", element: wrap(Compare) },

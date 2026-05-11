@@ -1,18 +1,24 @@
 ﻿import { useEffect, useState } from "react";
 import { Link, Outlet, useLocation, useSearchParams } from "react-router-dom";
-import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings } from "lucide-react";
+import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings, LayoutDashboard, Inbox, BookOpen, Radio } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import { api, type SessionItem } from "@/lib/api";
 import { useAgentStore } from "@/stores/agent";
+import { useOfficeStore } from "@/stores/office";
 import { ConnectionBanner } from "@/components/layout/ConnectionBanner";
 
-const NAV = [
-  { to: "/", icon: BarChart3, key: "home" as const },
-  { to: "/agent", icon: Bot, key: "agent" as const },
-  { to: "/settings", icon: Settings, key: "settings" as const },
-  { to: "/correlation", icon: BarChart3, key: "correlation" as const },
+const OFFICE_NAV = [
+  { to: "/office/floor",    icon: LayoutDashboard, label: "Floor" },
+  { to: "/office/inbox",    icon: Inbox,           label: "Inbox" },
+  { to: "/office/book",     icon: BookOpen,        label: "Book" },
+  { to: "/office/mandates", icon: Radio,           label: "Mandates" },
+];
+
+const RESEARCH_NAV = [
+  { to: "/agent",       icon: Bot,      key: "agent" as const },
+  { to: "/settings",    icon: Settings, key: "settings" as const },
 ];
 
 export function Layout() {
@@ -24,6 +30,7 @@ export function Layout() {
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const sseStatus = useAgentStore(s => s.sseStatus);
   const sseRetryAttempt = useAgentStore(s => s.sseRetryAttempt);
+  const pendingCount = useOfficeStore(s => s.strategies.filter(x => x.status === "pending").length);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("qa-sidebar") === "collapsed");
 
   const activeSessionId = searchParams.get("session");
@@ -80,26 +87,73 @@ export function Layout() {
           </Link>
         </div>
 
-        {/* Nav */}
-        <nav className={cn("space-y-0.5", collapsed ? "p-1" : "p-2")}>
-          {NAV.map(({ to, icon: Icon, key }) => (
-            <Link
-              key={to}
-              to={to}
-              className={cn(
-                "flex items-center rounded-md text-sm transition-colors",
-                collapsed ? "justify-center p-2" : "gap-3 px-3 py-2",
-                (to === "/" ? pathname === "/" : pathname.startsWith(to))
-                  ? "bg-primary/10 text-primary font-medium"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
-              )}
-              title={collapsed ? t[key] : undefined}
-            >
-              <Icon className="h-4 w-4 shrink-0" />
-              {!collapsed && t[key]}
-            </Link>
-          ))}
-        </nav>
+        {/* Office section */}
+        <div className={cn("pt-2", collapsed ? "p-1" : "px-2")}>
+          {!collapsed && (
+            <p className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">Office</p>
+          )}
+          <nav className="space-y-0.5">
+            {OFFICE_NAV.map(({ to, icon: Icon, label }) => {
+              const isActive = to === "/office/floor"
+                ? pathname === "/" || pathname === "/office/floor"
+                : pathname.startsWith(to);
+              const badge = to === "/office/inbox" ? pendingCount : 0;
+              return (
+                <Link
+                  key={to}
+                  to={to}
+                  className={cn(
+                    "flex items-center rounded-md text-sm transition-colors",
+                    collapsed ? "justify-center p-2" : "gap-3 px-3 py-2",
+                    isActive
+                      ? "bg-primary/10 text-primary font-medium"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                  )}
+                  title={collapsed ? label : undefined}
+                >
+                  <Icon className="h-4 w-4 shrink-0" />
+                  {!collapsed && (
+                    <span className="flex-1">{label}</span>
+                  )}
+                  {!collapsed && badge > 0 && (
+                    <span className="h-4 min-w-4 px-1 rounded-full bg-primary text-primary-foreground text-[10px] font-bold flex items-center justify-center">
+                      {badge}
+                    </span>
+                  )}
+                  {collapsed && badge > 0 && (
+                    <span className="absolute top-0.5 right-0.5 h-2 w-2 rounded-full bg-primary pointer-events-none" />
+                  )}
+                </Link>
+              );
+            })}
+          </nav>
+        </div>
+
+        {/* Research section */}
+        <div className={cn("pt-3 border-t mt-2", collapsed ? "p-1" : "px-2")}>
+          {!collapsed && (
+            <p className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">Research</p>
+          )}
+          <nav className="space-y-0.5">
+            {RESEARCH_NAV.map(({ to, icon: Icon, key }) => (
+              <Link
+                key={to}
+                to={to}
+                className={cn(
+                  "flex items-center rounded-md text-sm transition-colors",
+                  collapsed ? "justify-center p-2" : "gap-3 px-3 py-2",
+                  pathname.startsWith(to)
+                    ? "bg-primary/10 text-primary font-medium"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                )}
+                title={collapsed ? t[key] : undefined}
+              >
+                <Icon className="h-4 w-4 shrink-0" />
+                {!collapsed && t[key]}
+              </Link>
+            ))}
+          </nav>
+        </div>
 
         {/* Sessions — hidden when collapsed */}
         {!collapsed && (
