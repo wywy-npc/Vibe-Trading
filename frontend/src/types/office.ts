@@ -2,6 +2,8 @@ export type StrategyOrigin = "overnight_loop" | "mandate" | "event_trigger" | "m
 export type StrategyStatus = "pending" | "approved" | "rejected" | "deferred" | "live" | "paused";
 export type DecisionAction = "approve" | "reject" | "modify" | "defer";
 
+export type AgentStatus = "idle" | "scanning" | "backtesting" | "encoding" | "surfacing" | "complete";
+
 export interface StrategyMetrics {
   sharpe: number;
   max_drawdown: number;
@@ -9,6 +11,13 @@ export interface StrategyMetrics {
   annual_return: number;
   total_return: number;
   trade_count: number;
+}
+
+export interface RegimePerformance {
+  bull:     { return: number; win_rate: number };
+  bear:     { return: number; win_rate: number };
+  high_vol: { return: number; win_rate: number };
+  low_vol:  { return: number; win_rate: number };
 }
 
 export interface StrategyDecision {
@@ -19,10 +28,7 @@ export interface StrategyDecision {
   defer_condition?: string;
 }
 
-export interface EquityPoint {
-  t: number;
-  v: number;
-}
+export interface EquityPoint { t: number; v: number; }
 
 export interface Strategy {
   id: string;
@@ -30,6 +36,7 @@ export interface Strategy {
   origin: StrategyOrigin;
   signal_logic: string;
   metrics: StrategyMetrics;
+  regime_performance?: RegimePerformance;
   risk_flags: string[];
   status: StrategyStatus;
   allocation_pct?: number;
@@ -65,4 +72,26 @@ export interface OfficAlert {
   timestamp: string;
   read: boolean;
   strategy_id?: string;
+}
+
+export interface Agent {
+  id: string;
+  name: string;
+  role: string;
+  specialty: string;
+  status: AgentStatus;
+  current_task: string;
+  progress: number;
+  last_active: string;
+  strategies_surfaced: number;
+  backtests_run: number;
+}
+
+export interface ActivityEntry {
+  id: string;
+  agent_id: string;
+  agent_name: string;
+  message: string;
+  timestamp: string;
+  type: "scan" | "backtest" | "signal" | "complete" | "error" | "encode";
 }

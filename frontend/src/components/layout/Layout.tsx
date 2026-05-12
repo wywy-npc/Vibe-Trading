@@ -8,6 +8,8 @@ import { api, type SessionItem } from "@/lib/api";
 import { useAgentStore } from "@/stores/agent";
 import { useOfficeStore } from "@/stores/office";
 import { ConnectionBanner } from "@/components/layout/ConnectionBanner";
+import { AgentPanel } from "@/components/office/AgentPanel";
+import { MarketClock } from "@/components/office/MarketClock";
 
 const OFFICE_NAV = [
   { to: "/office/floor",    icon: LayoutDashboard, label: "Floor" },
@@ -32,12 +34,18 @@ export function Layout() {
   const sseRetryAttempt = useAgentStore(s => s.sseRetryAttempt);
   const pendingCount = useOfficeStore(s => s.strategies.filter(x => x.status === "pending").length);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("qa-sidebar") === "collapsed");
+  const [agentCollapsed, setAgentCollapsed] = useState(() => localStorage.getItem("qa-agent-panel") !== "expanded");
+  const isOfficePage = pathname === "/" || pathname.startsWith("/office");
 
   const activeSessionId = searchParams.get("session");
 
   useEffect(() => {
     localStorage.setItem("qa-sidebar", collapsed ? "collapsed" : "expanded");
   }, [collapsed]);
+
+  useEffect(() => {
+    localStorage.setItem("qa-agent-panel", agentCollapsed ? "collapsed" : "expanded");
+  }, [agentCollapsed]);
 
   const loadSessions = () => {
     api.listSessions()
@@ -290,9 +298,24 @@ export function Layout() {
       {/* Main */}
       <div className="flex-1 flex flex-col overflow-hidden">
         <ConnectionBanner status={sseStatus} retryAttempt={sseRetryAttempt} />
-        <main className="flex-1 overflow-auto">
-          <Outlet />
-        </main>
+
+        {/* Office topbar with market clock */}
+        {isOfficePage && (
+          <div className="border-b bg-card/30 backdrop-blur-sm shrink-0">
+            <div className="px-4 py-1.5 flex items-center justify-end">
+              <MarketClock />
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-1 overflow-hidden">
+          <main className="flex-1 overflow-auto">
+            <Outlet />
+          </main>
+          {isOfficePage && (
+            <AgentPanel collapsed={agentCollapsed} onToggle={() => setAgentCollapsed(v => !v)} />
+          )}
+        </div>
       </div>
     </div>
   );

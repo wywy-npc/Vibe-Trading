@@ -4,63 +4,59 @@
 
 @layer base {
   :root {
-    /* Light mode surfaces */
     --background: 220 20% 98%;
     --foreground: 220 20% 10%;
     --card: 0 0% 100%;
     --card-foreground: 220 20% 10%;
-
-    /* Brand accent */
     --primary: 27 90% 52%;
     --primary-foreground: 0 0% 100%;
-
     --muted: 220 14% 92%;
     --muted-foreground: 220 14% 46%;
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 100%;
     --border: 220 14% 87%;
-    --radius: 0.5rem;
-
-    /* Semantic colors */
-    --success: 142 71% 45%;
-    --danger: 0 84% 60%;
-    --warning: 38 92% 50%;
+    --radius: 0.375rem;
+    --success: 152 65% 42%;
+    --danger: 0 65% 52%;
+    --warning: 38 90% 50%;
     --info: 217 91% 60%;
-
-    /* Chart tokens */
     --chart-grid: 220 14% 90%;
     --chart-text: 220 14% 46%;
     --chart-axis: 220 14% 80%;
     --chart-compare-a: #3b82f6;
     --chart-compare-b: #f59e0b;
+    --surface-raised: 0 0% 97%;
+    --agent-pulse: 152 65% 42%;
   }
 
   .dark {
-    /* Dark mode: 4-level surface system */
-    --background: 220 20% 5%;       /* bg-base */
-    --foreground: 220 10% 92%;
-    --card: 220 20% 8%;             /* surface-1 */
-    --card-foreground: 220 10% 92%;
-
-    --primary: 27 90% 52%;
+    /* Deep terminal dark — blue-black base, 4-level surface system */
+    --background: 222 28% 4%;        /* void */
+    --foreground: 215 18% 86%;       /* cool white */
+    --card: 222 24% 7%;              /* surface-1 */
+    --card-foreground: 215 18% 86%;
+    --primary: 27 90% 52%;           /* orange — used sparingly */
     --primary-foreground: 0 0% 100%;
-
-    --muted: 220 20% 13%;           /* surface-2 */
-    --muted-foreground: 220 10% 55%;
-    --destructive: 0 62% 50%;
+    --muted: 222 22% 11%;            /* surface-2 */
+    --muted-foreground: 215 14% 48%;
+    --destructive: 0 60% 48%;
     --destructive-foreground: 0 0% 100%;
-    --border: 220 20% 18%;          /* surface-3 */
+    --border: 222 20% 15%;           /* surface-3 */
+    --surface-raised: 222 20% 9%;    /* elevated panels */
+    --radius: 0.375rem;
 
-    /* Semantic colors */
-    --success: 142 71% 45%;
-    --danger: 0 62% 50%;
-    --warning: 38 92% 50%;
-    --info: 217 91% 60%;
+    /* Terminal semantic colors — precise, not saturated */
+    --success: 152 60% 44%;          /* terminal green */
+    --danger: 0 60% 50%;             /* terminal red */
+    --warning: 38 88% 48%;           /* amber */
+    --info: 210 80% 56%;             /* blue */
 
-    /* Chart tokens */
-    --chart-grid: 220 20% 12%;
-    --chart-text: 220 10% 42%;
-    --chart-axis: 220 20% 22%;
+    /* Agent pulse */
+    --agent-pulse: 152 60% 44%;
+
+    --chart-grid: 222 22% 10%;
+    --chart-text: 215 14% 40%;
+    --chart-axis: 222 20% 18%;
     --chart-compare-a: #60a5fa;
     --chart-compare-b: #fbbf24;
   }
@@ -68,14 +64,79 @@
   * { @apply border-border; }
   body { @apply bg-background text-foreground; }
 
-  /* Prose table enhancements */
+  /* Tabular figures — numbers always align in columns */
+  .num {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+    letter-spacing: -0.01em;
+  }
+
+  /* Monospaced number display for key metrics */
+  .metric-val {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+    font-family: ui-monospace, "JetBrains Mono", "Fira Code", monospace;
+    letter-spacing: -0.02em;
+  }
+
+  /* Section labels — uppercase, tracked, subdued */
+  .label-caps {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: hsl(var(--muted-foreground) / 0.7);
+  }
+
+  /* Tight prose for dense layouts */
+  .prose-dense {
+    line-height: 1.45;
+  }
+
+  /* Subtle grid texture for deep background surfaces */
+  .surface-grid {
+    background-image: radial-gradient(circle, hsl(var(--border) / 0.4) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+
+  /* Glow border for active/highlighted elements */
+  .glow-primary {
+    box-shadow: 0 0 0 1px hsl(var(--primary) / 0.4), 0 0 16px hsl(var(--primary) / 0.08);
+  }
+  .glow-success {
+    box-shadow: 0 0 0 1px hsl(var(--success) / 0.4), 0 0 16px hsl(var(--success) / 0.08);
+  }
+
+  /* Agent pulse animation */
+  @keyframes agent-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+  .pulse-dot {
+    animation: agent-pulse 2s ease-in-out infinite;
+  }
+
+  /* Slide-in for new activity entries */
+  @keyframes slide-in-right {
+    from { opacity: 0; transform: translateX(8px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+  .slide-in { animation: slide-in-right 0.2s ease-out; }
+
+  /* Scan line animation for "live" feel */
+  @keyframes scan {
+    from { transform: translateY(-100%); }
+    to   { transform: translateY(100%); }
+  }
+
+  /* Scrollbar — very subtle on dark */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 2px; }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.4); }
+
+  /* Prose table */
   .prose table { border-collapse: collapse; width: 100%; }
   .prose th, .prose td { border: 1px solid hsl(var(--border)); }
   .prose tbody tr:nth-child(even) { background: hsl(var(--muted) / 0.3); }
-
-  /* Smooth scrollbar for webkit */
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground)); }
 }
