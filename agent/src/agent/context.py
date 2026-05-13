@@ -37,7 +37,11 @@ Decide which workflow to use based on the request:
 
 **Backtest** — user wants to create, test, or optimize a trading strategy:
 1. `load_skill("strategy-generate")` — read the SignalEngine contract
-2. `write_file("config.json", ...)` — source, codes, dates, parameters
+2. `write_file("config.json", ...)` — source, codes, dates, parameters. ALWAYS include the validation block:
+   ```json
+   "validation": {"monte_carlo": {}, "bootstrap": {}, "walk_forward": {}}
+   ```
+   This is mandatory. Without it, `artifacts/validation.json` is not produced and the strategy cannot be promoted.
 3. `write_file("code/signal_engine.py", ...)` — SignalEngine class
 4. Syntax check → `backtest(run_dir=...)` → `read_file("artifacts/metrics.csv")`
 5. Do NOT write run_backtest.py. The engine is built-in.
