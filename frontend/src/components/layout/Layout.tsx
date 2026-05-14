@@ -1,6 +1,6 @@
 ﻿import { useEffect, useState } from "react";
 import { Link, Outlet, useLocation, useSearchParams } from "react-router-dom";
-import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings, LayoutDashboard, Inbox, BookOpen, Radio } from "lucide-react";
+import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings, LayoutDashboard, Inbox, BookOpen, Radio, Users, ScrollText } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
 import { useDarkMode } from "@/hooks/useDarkMode";
@@ -16,6 +16,8 @@ const OFFICE_NAV = [
   { to: "/office/inbox",    icon: Inbox,           label: "Inbox" },
   { to: "/office/book",     icon: BookOpen,        label: "Book" },
   { to: "/office/mandates", icon: Radio,           label: "Mandates" },
+  { to: "/office/agents",   icon: Users,           label: "Fleet" },
+  { to: "/office/ledger",   icon: ScrollText,      label: "Ledger" },
 ];
 
 const RESEARCH_NAV = [

@@ -18,10 +18,12 @@ const Correlation = lazy(() =>
 );
 
 // Office pages
-const Floor = lazy(() => import("@/pages/office/Floor").then((m) => ({ default: m.Floor })));
-const Inbox = lazy(() => import("@/pages/office/Inbox").then((m) => ({ default: m.Inbox })));
-const Book = lazy(() => import("@/pages/office/Book").then((m) => ({ default: m.Book })));
+const Floor    = lazy(() => import("@/pages/office/Floor").then((m)    => ({ default: m.Floor })));
+const Inbox    = lazy(() => import("@/pages/office/Inbox").then((m)    => ({ default: m.Inbox })));
+const Book     = lazy(() => import("@/pages/office/Book").then((m)     => ({ default: m.Book })));
 const Mandates = lazy(() => import("@/pages/office/Mandates").then((m) => ({ default: m.Mandates })));
+const Agents   = lazy(() => import("@/pages/office/Agents").then((m)   => ({ default: m.Agents })));
+const Ledger   = lazy(() => import("@/pages/office/Ledger").then((m)   => ({ default: m.Ledger })));
 
 function PageLoader() {
   return (
@@ -48,6 +50,8 @@ export const router = createBrowserRouter([
       { path: "/office/inbox", element: wrap(Inbox) },
       { path: "/office/book", element: wrap(Book) },
       { path: "/office/mandates", element: wrap(Mandates) },
+      { path: "/office/agents",   element: wrap(Agents) },
+      { path: "/office/ledger",   element: wrap(Ledger) },
       { path: "/agent", element: wrap(Agent) },
       { path: "/research", element: wrap(Home) },
       { path: "/settings", element: wrap(Settings) },

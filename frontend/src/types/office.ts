@@ -95,3 +95,17 @@ export interface ActivityEntry {
   timestamp: string;
   type: "scan" | "backtest" | "signal" | "complete" | "error" | "encode";
 }
+
+export interface DecisionRecord {
+  id: string;
+  timestamp: string;
+  strategy_id: string;
+  strategy_name: string;
+  market: string;
+  agent_id: string;
+  action: DecisionAction;
+  allocation_pct?: number;
+  reason: string;
+  defer_condition?: string;
+  metrics: Pick<StrategyMetrics, "sharpe" | "max_drawdown" | "annual_return" | "win_rate">;
+}

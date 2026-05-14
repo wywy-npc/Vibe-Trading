@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { Strategy, Mandate, OfficAlert, Agent, ActivityEntry } from "@/types/office";
+import type { Strategy, Mandate, OfficAlert, Agent, ActivityEntry, DecisionRecord } from "@/types/office";
 
 // ─── Deterministic helpers ────────────────────────────────────────────────────
 
@@ -192,6 +192,45 @@ const SEED_ALERTS = [
   { id: "alert-004", type: "mandate_complete" as const,  message: "HK Small Cap Momentum Scan completed at 02:14 HKT. 3 candidates screened, 2 passed filters.", timestamp: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(), read: true },
 ];
 
+const SEED_DECISIONS: DecisionRecord[] = [
+  {
+    id: "dec-001",
+    timestamp: new Date(Date.now() - 28 * 24 * 60 * 60 * 1000).toISOString(),
+    strategy_id: "strat-004",
+    strategy_name: "HK Momentum Factor #3",
+    market: "HK Equities",
+    agent_id: "momentum-scanner",
+    action: "approve",
+    allocation_pct: 12,
+    reason: "Clean signal, low correlation to book.",
+    metrics: { sharpe: 1.52, max_drawdown: -9.1, annual_return: 26.1, win_rate: 63.0 },
+  },
+  {
+    id: "dec-002",
+    timestamp: new Date(Date.now() - 55 * 24 * 60 * 60 * 1000).toISOString(),
+    strategy_id: "strat-005",
+    strategy_name: "USD Carry Basket",
+    market: "Forex",
+    agent_id: "macro-encoder",
+    action: "approve",
+    allocation_pct: 8,
+    reason: "Good diversifier, low equity beta.",
+    metrics: { sharpe: 1.12, max_drawdown: -7.4, annual_return: 14.2, win_rate: 56.3 },
+  },
+  {
+    id: "dec-003",
+    timestamp: new Date(Date.now() - 12 * 24 * 60 * 60 * 1000).toISOString(),
+    strategy_id: "strat-006",
+    strategy_name: "EM FX Short Basket",
+    market: "Forex",
+    agent_id: "momentum-scanner",
+    action: "defer",
+    reason: "Good strategy, wrong macro timing right now.",
+    defer_condition: "Revisit when DXY > 104 and US 2Y yield breaks above 4.5%",
+    metrics: { sharpe: 1.33, max_drawdown: -5.8, annual_return: 19.3, win_rate: 60.1 },
+  },
+];
+
 const SEED_AGENTS: Agent[] = [
   {
     id: "momentum-scanner",
@@ -262,6 +301,7 @@ interface OfficeState {
   alerts: OfficAlert[];
   agents: Agent[];
   activity: ActivityEntry[];
+  decisions: DecisionRecord[];
 
   approveStrategy: (id: string, allocation_pct: number, reason: string) => void;
   rejectStrategy: (id: string, reason: string) => void;
@@ -293,35 +333,48 @@ export const useOfficeStore = create<OfficeState>()(
       alerts: SEED_ALERTS,
       agents: SEED_AGENTS,
       activity: SEED_ACTIVITY,
+      decisions: SEED_DECISIONS,
 
       approveStrategy: (id, allocation_pct, reason) =>
-        set((s: OfficeState) => ({
-          strategies: s.strategies.map((st: Strategy) =>
-            st.id === id ? { ...st, status: "live" as const, allocation_pct, live_since: new Date().toISOString(), decision: { action: "approve" as const, reason, timestamp: new Date().toISOString(), allocation_pct } } : st
-          ),
-        })),
+        set((s: OfficeState) => {
+          const st = s.strategies.find((x: Strategy) => x.id === id);
+          const rec: DecisionRecord = { id: `dec-${Date.now()}`, timestamp: new Date().toISOString(), strategy_id: id, strategy_name: st?.name ?? id, market: st?.market ?? "", agent_id: st?.agent_id ?? "", action: "approve" as const, allocation_pct, reason, metrics: { sharpe: st?.metrics.sharpe ?? 0, max_drawdown: st?.metrics.max_drawdown ?? 0, annual_return: st?.metrics.annual_return ?? 0, win_rate: st?.metrics.win_rate ?? 0 } };
+          return {
+            strategies: s.strategies.map((x: Strategy) => x.id === id ? { ...x, status: "live" as const, allocation_pct, live_since: new Date().toISOString(), decision: { action: "approve" as const, reason, timestamp: new Date().toISOString(), allocation_pct } } : x),
+            decisions: [rec, ...s.decisions],
+          };
+        }),
 
       rejectStrategy: (id, reason) =>
-        set((s: OfficeState) => ({
-          strategies: s.strategies.map((st: Strategy) =>
-            st.id === id ? { ...st, status: "rejected" as const, decision: { action: "reject" as const, reason, timestamp: new Date().toISOString() } } : st
-          ),
-        })),
+        set((s: OfficeState) => {
+          const st = s.strategies.find((x: Strategy) => x.id === id);
+          const rec: DecisionRecord = { id: `dec-${Date.now()}`, timestamp: new Date().toISOString(), strategy_id: id, strategy_name: st?.name ?? id, market: st?.market ?? "", agent_id: st?.agent_id ?? "", action: "reject" as const, reason, metrics: { sharpe: st?.metrics.sharpe ?? 0, max_drawdown: st?.metrics.max_drawdown ?? 0, annual_return: st?.metrics.annual_return ?? 0, win_rate: st?.metrics.win_rate ?? 0 } };
+          return {
+            strategies: s.strategies.map((x: Strategy) => x.id === id ? { ...x, status: "rejected" as const, decision: { action: "reject" as const, reason, timestamp: new Date().toISOString() } } : x),
+            decisions: [rec, ...s.decisions],
+          };
+        }),
 
       deferStrategy: (id, reason, condition) =>
-        set((s: OfficeState) => ({
-          strategies: s.strategies.map((st: Strategy) =>
-            st.id === id ? { ...st, status: "deferred" as const, decision: { action: "defer" as const, reason, defer_condition: condition, timestamp: new Date().toISOString() } } : st
-          ),
-        })),
+        set((s: OfficeState) => {
+          const st = s.strategies.find((x: Strategy) => x.id === id);
+          const rec: DecisionRecord = { id: `dec-${Date.now()}`, timestamp: new Date().toISOString(), strategy_id: id, strategy_name: st?.name ?? id, market: st?.market ?? "", agent_id: st?.agent_id ?? "", action: "defer" as const, reason, defer_condition: condition, metrics: { sharpe: st?.metrics.sharpe ?? 0, max_drawdown: st?.metrics.max_drawdown ?? 0, annual_return: st?.metrics.annual_return ?? 0, win_rate: st?.metrics.win_rate ?? 0 } };
+          return {
+            strategies: s.strategies.map((x: Strategy) => x.id === id ? { ...x, status: "deferred" as const, decision: { action: "defer" as const, reason, defer_condition: condition, timestamp: new Date().toISOString() } } : x),
+            decisions: [rec, ...s.decisions],
+          };
+        }),
 
       modifyStrategy: (id, instructions) =>
-        set((s: OfficeState) => ({
-          strategies: s.strategies.map((st: Strategy) =>
-            st.id === id ? { ...st, decision: { action: "modify" as const, reason: instructions, timestamp: new Date().toISOString() } } : st
-          ),
-          alerts: [{ id: `alert-mod-${id}`, type: "strategy_surfaced" as const, message: `Modification sent to agent for "${s.strategies.find((x: Strategy) => x.id === id)?.name}". Will re-surface when ready.`, timestamp: new Date().toISOString(), read: false, strategy_id: id }, ...s.alerts],
-        })),
+        set((s: OfficeState) => {
+          const st = s.strategies.find((x: Strategy) => x.id === id);
+          const rec: DecisionRecord = { id: `dec-${Date.now()}`, timestamp: new Date().toISOString(), strategy_id: id, strategy_name: st?.name ?? id, market: st?.market ?? "", agent_id: st?.agent_id ?? "", action: "modify" as const, reason: instructions, metrics: { sharpe: st?.metrics.sharpe ?? 0, max_drawdown: st?.metrics.max_drawdown ?? 0, annual_return: st?.metrics.annual_return ?? 0, win_rate: st?.metrics.win_rate ?? 0 } };
+          return {
+            strategies: s.strategies.map((x: Strategy) => x.id === id ? { ...x, decision: { action: "modify" as const, reason: instructions, timestamp: new Date().toISOString() } } : x),
+            alerts: [{ id: `alert-mod-${id}`, type: "strategy_surfaced" as const, message: `Modification sent to agent for "${st?.name}". Will re-surface when ready.`, timestamp: new Date().toISOString(), read: false, strategy_id: id }, ...s.alerts],
+            decisions: [rec, ...s.decisions],
+          };
+        }),
 
       pauseStrategy:  (id) => set((s: OfficeState) => ({ strategies: s.strategies.map((st: Strategy) => st.id === id ? { ...st, status: "paused"  as const } : st) })),
       resumeStrategy: (id) => set((s: OfficeState) => ({ strategies: s.strategies.map((st: Strategy) => st.id === id ? { ...st, status: "live"    as const } : st) })),
