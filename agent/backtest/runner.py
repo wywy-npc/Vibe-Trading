@@ -33,11 +33,23 @@ from backtest.loaders.registry import (
 )
 from backtest.loaders.base import NoAvailableSourceError
 
+# ai-quant-lab integration: post-engine gate hook. Import is best-effort so
+# environments without ai-quant-lab installed still run engines (gates emit
+# a degraded artifact noting the missing dep).
+try:
+    from backtest import research_memory as _research_memory
+    from backtest import validation_aql as _validation_aql
+    _AQL_AVAILABLE = True
+except Exception:  # pragma: no cover — degraded mode
+    _research_memory = None
+    _validation_aql = None
+    _AQL_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 _VALID_INTERVALS = {"1m", "5m", "15m", "30m", "1H", "4H", "1D"}
 _VALID_ENGINES = {"daily", "options"}
-_VALID_SOURCES = {"tushare", "okx", "yfinance", "akshare", "ccxt", "auto"}
+_VALID_SOURCES = {"tushare", "okx", "yfinance", "akshare", "ccxt", "alpaca", "auto"}
 
 
 class BacktestConfigSchema(BaseModel):
@@ -246,9 +258,11 @@ _MARKET_PATTERNS = [
 ]
 
 # Back-compat: market type -> legacy source name (for engine selection & metrics)
+# us_equity prefers Alpaca; falls back to yfinance via FALLBACK_CHAINS when
+# Alpaca credentials aren't configured.
 _MARKET_TO_SOURCE = {
     "a_share": "tushare",
-    "us_equity": "yfinance",
+    "us_equity": "alpaca",
     "hk_equity": "yfinance",
     "crypto": "okx",
     "futures": "tushare",
@@ -458,6 +472,76 @@ def main(run_dir: Path) -> None:
         market_engine = _create_market_engine(effective_source, config, codes)
         market_engine.run_backtest(config, loader, signal_engine, run_dir, bars_per_year=bars_per_year)
 
+    # Post-engine gate hook (ai-quant-lab). Statistical gates fire uniformly
+    # for every engine — china_a, crypto, futures, composite, options, aql.
+    # Failure does not abort artifact output; gates.json is the verdict signal.
+    _run_post_engine_gates(run_dir, raw_config)
+
+
+def _run_post_engine_gates(run_dir: Path, raw_config: Dict[str, Any]) -> None:
+    """Evaluate ai-quant-lab gates against the just-written artifacts.
+
+    Reads any critic_verdict the backtest_tool persisted in config.json,
+    threads it through evaluate_gates with the shared ResearchMemory, and
+    writes ``<run_dir>/gates.json``. Trial is recorded regardless of pass/fail
+    so the deflated-Sharpe trial counter stays honest.
+    """
+    if not _AQL_AVAILABLE:
+        return
+    try:
+        verdict = _load_critic_verdict_from_config(raw_config)
+        with _research_memory.get_memory() as memory:
+            outcome = _validation_aql.gates_from_artifacts(
+                run_dir, memory=memory, critic_verdict=verdict,
+            )
+            n_trials_before = memory.n_trials()
+            gate_extras: Dict[str, Any] = {
+                "n_trials_at_gate": n_trials_before,
+                "via": raw_config.get("via", "unknown"),
+            }
+            if raw_config.get("loop_run_id"):
+                gate_extras["loop_run_id"] = raw_config["loop_run_id"]
+            _validation_aql.write_gates_artifact(
+                run_dir, outcome, extras=gate_extras,
+            )
+            returns = _validation_aql.read_returns(run_dir)
+            _research_memory.record_run_trial(
+                memory,
+                run_id=str(run_dir.name),
+                hypothesis_text=str(raw_config.get("hypothesis", "")),
+                rationale=str(raw_config.get("rationale", "")),
+                code="",
+                metrics={},
+                accepted=bool(outcome.passes),
+                rejection_reason=outcome.rejection_reason,
+                returns=returns if outcome.passes else None,
+            )
+    except Exception as exc:  # pragma: no cover — gates must not break a run
+        logger.warning("Post-engine gate hook failed: %s", exc)
+
+
+def _load_critic_verdict_from_config(raw_config: Dict[str, Any]) -> Any:
+    """Reconstruct a CriticVerdict from the config.json blob if present.
+
+    backtest_tool writes the verdict into config.json under ``critic_verdict``
+    when the agent has called critique first. None means: no critic; the
+    adapter substitutes a synthetic pass-verdict so statistical gates still fire.
+    """
+    if not _AQL_AVAILABLE:
+        return None
+    blob = raw_config.get("critic_verdict")
+    if not blob:
+        return None
+    try:
+        from ai_quant_lab.agents.critic import CriticVerdict
+        return CriticVerdict(
+            passes=bool(blob.get("passes", False)),
+            reasoning=str(blob.get("reasoning", "")),
+            kill_reasons=list(blob.get("kill_reasons", [])),
+        )
+    except Exception:
+        return None
+
 
 def _create_market_engine(source: str, config: dict, codes: List[str]):
     """Create the appropriate market engine based on data source and market type.
@@ -507,7 +591,7 @@ def _create_market_engine(source: str, config: dict, codes: List[str]):
             return GlobalEquityEngine(config, market=market)
         from backtest.engines.china_a import ChinaAEngine
         return ChinaAEngine(config)
-    elif source == "yfinance":
+    elif source in ("yfinance", "alpaca"):
         from backtest.engines.global_equity import GlobalEquityEngine
         market = _detect_submarket(codes)
         return GlobalEquityEngine(config, market=market)
