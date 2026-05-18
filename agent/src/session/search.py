@@ -82,6 +82,15 @@ class SessionSearchIndex:
             self._conn.execute("PRAGMA synchronous=NORMAL")
         return self._conn
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Shared SQLite connection for siblings that store state in the same DB.
+
+        Used by the checkpoint/approvals layer and the LangGraph SqliteSaver so
+        all subsystems share one WAL-mode connection and one backup story.
+        """
+        return self._get_conn()
+
     def _init_db(self) -> None:
         """Create tables and FTS5 virtual table if they don't exist."""
         conn = self._get_conn()
@@ -129,6 +138,37 @@ class SessionSearchIndex:
                 conn.execute(trigger_sql)
             except sqlite3.OperationalError:
                 pass
+
+        # Approvals table: human checkpoints raised by per-skill graphs.
+        # Lives in this DB so all HITL state shares one WAL-mode connection
+        # alongside the LangGraph SqliteSaver tables.
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS approvals (
+                approval_id         TEXT PRIMARY KEY,
+                thread_id           TEXT NOT NULL,
+                session_id          TEXT NOT NULL,
+                attempt_id          TEXT NOT NULL,
+                skill_name          TEXT NOT NULL,
+                checkpoint_id       TEXT NOT NULL,
+                status              TEXT NOT NULL,
+                prompt              TEXT NOT NULL,
+                payload_json        TEXT NOT NULL,
+                allowed_edits_json  TEXT NOT NULL,
+                decision_types_json TEXT NOT NULL,
+                requires_role       TEXT,
+                decision_json       TEXT,
+                created_at          REAL NOT NULL,
+                expires_at          REAL,
+                decided_at          REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_approvals_inbox
+                ON approvals(status, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_approvals_session
+                ON approvals(session_id, status);
+            CREATE INDEX IF NOT EXISTS idx_approvals_attempt
+                ON approvals(attempt_id);
+        """)
+
         conn.commit()
 
     def index_session(self, session_id: str, title: str = "") -> None:

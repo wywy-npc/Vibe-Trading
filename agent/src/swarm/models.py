@@ -15,12 +15,14 @@ class TaskStatus(str, Enum):
     """SwarmTask lifecycle status.
 
     Transitions:
-        pending -> blocked -> in_progress -> completed | failed | cancelled
+        pending -> blocked -> in_progress -> {waiting_user, completed, failed, cancelled}
+        waiting_user -> in_progress (on resume) or cancelled
     """
 
     pending = "pending"
     blocked = "blocked"
     in_progress = "in_progress"
+    waiting_user = "waiting_user"
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"

@@ -105,7 +105,70 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(settings),
     }),
+
+  // Approvals (HITL checkpoints — backend gated by ENABLE_HITL)
+  listApprovals: (params?: { sessionId?: string; requiresRole?: string; limit?: number }) => {
+    const q = new URLSearchParams({ status: "pending" });
+    if (params?.sessionId) q.set("session_id", params.sessionId);
+    if (params?.requiresRole) q.set("requires_role", params.requiresRole);
+    if (params?.limit) q.set("limit", String(params.limit));
+    return request<Approval[]>(`/approvals?${q.toString()}`);
+  },
+  getApproval: (id: string) => request<Approval>(`/approvals/${id}`),
+  decideApproval: (id: string, body: ApprovalDecisionRequest) =>
+    request<ApprovalDecisionResponse>(`/approvals/${id}/decide`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 };
+
+// --- Approval types ---
+
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "deferred" | "expired";
+export type ApprovalAction = "approve" | "reject" | "modify" | "defer";
+
+export interface ApprovalDecision {
+  action: ApprovalAction;
+  edits: Record<string, unknown>;
+  reason: string | null;
+  decided_by: string;
+  decided_at: number;
+  defer_condition?: string;
+}
+
+export interface Approval {
+  approval_id: string;
+  thread_id: string;
+  session_id: string;
+  attempt_id: string;
+  skill_name: string;
+  checkpoint_id: string;
+  status: ApprovalStatus;
+  prompt: string;
+  payload: Record<string, unknown>;
+  allowed_edits: string[];
+  decision_types: ApprovalAction[];
+  requires_role: string | null;
+  decision: ApprovalDecision | null;
+  created_at: number;
+  expires_at: number | null;
+  decided_at: number | null;
+}
+
+export interface ApprovalDecisionRequest {
+  action: ApprovalAction;
+  edits?: Record<string, unknown>;
+  reason?: string;
+  defer_condition?: string;
+  decided_by?: string;
+}
+
+export interface ApprovalDecisionResponse {
+  status: "resumed" | "terminated";
+  approval: Approval;
+  attempt_id?: string;
+  resume_error?: string;
+}
 
 // --- Swarm types ---
 

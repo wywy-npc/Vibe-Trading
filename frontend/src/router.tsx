@@ -16,6 +16,7 @@ const Settings = lazy(() =>
 const Correlation = lazy(() =>
   import("@/pages/Correlation").then((m) => ({ default: m.Correlation })),
 );
+const Inbox = lazy(() => import("@/pages/Inbox").then((m) => ({ default: m.Inbox })));
 
 function PageLoader() {
   return (
@@ -43,6 +44,7 @@ export const router = createBrowserRouter([
       { path: "/runs/:runId", element: wrap(RunDetail) },
       { path: "/compare", element: wrap(Compare) },
       { path: "/correlation", element: wrap(Correlation) },
+      { path: "/inbox", element: wrap(Inbox) },
     ],
   },
 ]);

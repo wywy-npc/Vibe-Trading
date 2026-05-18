@@ -18,6 +18,8 @@ agent/.ui_runtime/
 agent/.tasks/
 agent/uploads/
 agent/tests/*_result.json
+agent/research_memory.db
+agent/research_memory.db-*
 .ruff_cache/
 frontend/dist/
 frontend/tsconfig.tsbuildinfo
@@ -56,3 +58,10 @@ NOTES.md
 
 # Agent tool aliases (auto-generated mirror of CLAUDE.md)
 AGENTS.md
+
+# Nested upstream clone (not part of this repo)
+frontend/Vibe-Trading/
+
+# Live deployment state (stored in ~/.vibe-trading/ — not in repo)
+agent/deployments.db
+agent/deployments.db-*

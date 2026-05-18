@@ -1,8 +1,16 @@
 ---
 name: strategy-generate
-description: Create, modify, and optimize quantitative trading strategies, then backtest and evaluate them.
+description: Manually author, modify, or optimize a quantitative strategy's signal_engine.py code, then backtest it. Use when iterating on existing code or when the user has a specific strategy in mind. For discovering NEW ideas, prefer strategy-discovery (hard-gated research loop) — the gate guarantees only hold when the loop, not chat, controls order.
 category: strategy
 ---
+
+## When to use this vs `strategy-discovery`
+
+- **strategy-generate (this skill)** — manual code path. User describes a specific strategy ("MA crossover on SPY with 20/50 windows") and you write `signal_engine.py` + `config.json`. Output is one backtest result; gates fire in the runner post-hook with `via="manual"`.
+- **[[strategy-discovery]]** — autonomous discovery path. User asks to "find / discover / generate strategies on X". You call the `research_loop` tool once; Python orchestrates Hypothesis → Critic → Code → Backtest → Gates. The result is `via="loop"` and re-validatable post-hoc.
+
+If the user said "find strategies on SPY", use strategy-discovery — strategy-generate cannot replicate the hard-gate invariant manually.
+
 
 ## Workflow
 
