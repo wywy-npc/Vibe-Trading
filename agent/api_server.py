@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Security, UploadFile, status
+from fastapi import Body, BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Security, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -1415,6 +1415,328 @@ async def session_events(
 
 
 # ============================================================================
+# Approvals API (HITL checkpoints)
+# ============================================================================
+
+_approval_service = None
+
+
+def _hitl_enabled() -> bool:
+    """Approvals endpoints are inert unless ENABLE_HITL is set."""
+    return os.getenv("ENABLE_HITL", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resume_graph_after_decision(approval) -> Dict[str, Any]:
+    """Drive ``graph.invoke(Command(resume=...))`` after an approve/modify/defer.
+
+    Looks up the skill's checkpoint graph via the registry and resumes from
+    the persisted SqliteSaver state keyed by ``thread_id``. Returns metadata
+    the API surfaces back to the caller — the next checkpoint id (if any),
+    or graph-completed when the run finished.
+    """
+    from src.checkpoint import get_build_graph
+    from src.session.search import get_shared_index
+    from langgraph.types import Command
+
+    decision = approval.decision or {}
+    resume_value = {
+        "action": decision.get("action", "approve"),
+        "edits": decision.get("edits") or {},
+    }
+    svc = _get_approval_service()
+    index = get_shared_index()
+    try:
+        build = get_build_graph(approval.skill_name)
+    except (FileNotFoundError, AttributeError, ImportError) as exc:
+        return {"resume_error": f"no pipeline for skill {approval.skill_name!r}: {exc}"}
+
+    graph = build(svc, index.db_path)
+    config = {"configurable": {"thread_id": approval.thread_id}}
+    # Flip Attempt back to RUNNING while the graph executes.
+    _flip_attempt_status(approval, new_status="running")
+
+    try:
+        result = graph.invoke(Command(resume=resume_value), config=config)
+    except Exception as exc:  # surfaced back as resume_error, not 500
+        _flip_attempt_status(approval, new_status="failed", error=str(exc))
+        return {"resume_error": str(exc)}
+
+    # Find the next pending checkpoint for this thread, if any.
+    next_pending = [
+        a for a in svc.list_pending(limit=200)
+        if a.thread_id == approval.thread_id
+    ]
+    out: Dict[str, Any] = {
+        "attempt_id": approval.attempt_id,
+        "graph_state": {k: v for k, v in (result or {}).items() if k != "pending_payload"},
+    }
+    if next_pending:
+        # Graph paused at next checkpoint — Attempt stays WAITING_USER
+        # (pause_callback will fire when the checkpoint node ran).
+        out["next_approval_id"] = next_pending[0].approval_id
+        out["next_checkpoint_id"] = next_pending[0].checkpoint_id
+    elif result and result.get("rejected_at"):
+        # Graph terminated by reject — handled by reject_callback above.
+        out["graph_status"] = "terminated"
+    else:
+        # Graph ran to completion. For pm_go_live, call the skill's post-approve
+        # deploy hook to register in deployments.db and fork the paper runner.
+        if approval.checkpoint_id == "pm_go_live":
+            try:
+                import importlib.util as _ilu
+                _skills_dir = Path(__file__).parent / "src" / "skills"
+                _pipeline_path = _skills_dir / approval.skill_name / "pipeline.py"
+                if _pipeline_path.exists():
+                    _spec = _ilu.spec_from_file_location("_deploy_hook", _pipeline_path)
+                    _mod = _ilu.module_from_spec(_spec)
+                    _spec.loader.exec_module(_mod)
+                    _deploy_fn = getattr(_mod, "on_pm_go_live_approved", None)
+                    if _deploy_fn:
+                        _deploy_result = _deploy_fn(approval.payload or {})
+                        out.update({k: v for k, v in _deploy_result.items() if v is not None})
+            except Exception as _exc:
+                out["deploy_error"] = str(_exc)
+        _flip_attempt_status(approval, new_status="completed")
+        out["graph_status"] = "completed"
+    return out
+
+
+def _flip_attempt_status(approval, *, new_status: str, error: Optional[str] = None) -> None:
+    """Update Attempt.status via SessionService when a checkpoint pause/resume/reject fires."""
+    svc = _get_session_service()
+    if svc is None:
+        return
+    attempt = svc.store.get_attempt(approval.session_id, approval.attempt_id)
+    if attempt is None:
+        return
+    from src.session.models import AttemptStatus
+    from datetime import datetime as _dt
+    attempt.status = AttemptStatus(new_status)
+    if new_status in ("failed", "completed"):
+        attempt.completed_at = _dt.now().isoformat()
+    if error:
+        attempt.error = error
+    svc.store.update_attempt(attempt)
+    svc.event_bus.emit(
+        approval.session_id,
+        f"attempt.{new_status}",
+        {"attempt_id": approval.attempt_id, "checkpoint_id": approval.checkpoint_id},
+    )
+
+
+def _on_checkpoint_pause(approval) -> None:
+    _flip_attempt_status(approval, new_status="waiting_user")
+
+
+def _on_checkpoint_reject(approval) -> None:
+    _flip_attempt_status(
+        approval,
+        new_status="failed",
+        error=f"rejected at checkpoint:{approval.checkpoint_id}",
+    )
+
+
+def _get_approval_service():
+    """Lazy-init the ApprovalService against the shared sessions.db connection."""
+    global _approval_service
+    if _approval_service is not None:
+        return _approval_service
+    if not _hitl_enabled():
+        return None
+    from src.session.search import get_shared_index
+    from src.checkpoint import ApprovalService
+
+    index = get_shared_index()
+    _approval_service = ApprovalService(
+        index.connection,
+        resume_callback=_resume_graph_after_decision,
+        pause_callback=_on_checkpoint_pause,
+        reject_callback=_on_checkpoint_reject,
+    )
+    return _approval_service
+
+
+class ApprovalDecisionRequest(BaseModel):
+    """PM decision body for ``POST /approvals/{id}/decide``."""
+    action: str = Field(..., description="approve | reject | modify | defer")
+    edits: Optional[Dict[str, Any]] = None
+    reason: Optional[str] = None
+    defer_condition: Optional[str] = None
+    decided_by: Optional[str] = None
+
+
+@app.get("/approvals", dependencies=[Depends(require_auth)])
+async def list_approvals(
+    status_filter: str = Query("pending", alias="status"),
+    session_id: Optional[str] = None,
+    requires_role: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Inbox query — list approvals (default: pending) ordered newest first."""
+    svc = _get_approval_service()
+    if not svc:
+        raise HTTPException(status_code=501, detail="HITL approvals not enabled (set ENABLE_HITL=true)")
+    if status_filter != "pending":
+        # Non-pending filters (approved/rejected/etc.) not exposed in v1 to keep
+        # the Inbox query path narrow; widen here as the UI grows history views.
+        raise HTTPException(status_code=400, detail="only status=pending is supported in v1")
+    items = svc.list_pending(session_id=session_id, requires_role=requires_role, limit=limit)
+    return [a.to_dict() for a in items]
+
+
+@app.get("/approvals/{approval_id}", dependencies=[Depends(require_auth)])
+async def get_approval(approval_id: str):
+    """Fetch a single approval (pending or resolved) by id."""
+    from src.checkpoint import NotFoundError
+    svc = _get_approval_service()
+    if not svc:
+        raise HTTPException(status_code=501, detail="HITL approvals not enabled (set ENABLE_HITL=true)")
+    try:
+        return svc.get(approval_id).to_dict()
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail=f"approval {approval_id} not found")
+
+
+@app.post("/approvals/{approval_id}/decide", dependencies=[Depends(require_auth)])
+async def decide_approval(approval_id: str, body: ApprovalDecisionRequest):
+    """Resolve a pending approval. Approve/modify/defer resume the run; reject terminates."""
+    from src.checkpoint import ConflictError, DecisionAction, NotFoundError
+    svc = _get_approval_service()
+    if not svc:
+        raise HTTPException(status_code=501, detail="HITL approvals not enabled (set ENABLE_HITL=true)")
+    try:
+        action = DecisionAction(body.action)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"unknown action {body.action!r}")
+    try:
+        return svc.submit_decision(
+            approval_id,
+            action,
+            edits=body.edits,
+            reason=body.reason,
+            defer_condition=body.defer_condition,
+            decided_by=body.decided_by or "",
+        )
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail=f"approval {approval_id} not found")
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class RunSkillRequest(BaseModel):
+    """Body for ``POST /skills/{skill_name}/run``."""
+    session_id: str = Field(..., description="Owning session id; created via /sessions first")
+    attempt_id: Optional[str] = Field(None, description="Optional id — auto-generated when omitted")
+    initial_state: Optional[Dict[str, Any]] = Field(default=None, description="Optional initial GraphState fields (e.g. seed payload)")
+
+
+@app.post("/skills/{skill_name}/run", dependencies=[Depends(require_auth)])
+async def run_skill_via_graph(skill_name: str, body: RunSkillRequest):
+    """Start a per-skill checkpoint-graph run.
+
+    For skills with an ``autonomy`` block the graph compiles, invokes through
+    the first work node(s), and pauses at the first checkpoint — returning the
+    new approval_id. For pure-auto skills (no checkpoints) the graph runs to
+    completion and returns the final state.
+
+    Skills without a ``pipeline.py`` return 404; this endpoint is the
+    parallel-path entry for HITL skills and does not affect the existing
+    ``/sessions/{id}/messages`` -> AgentLoop flow.
+    """
+    import uuid as _uuid
+
+    if not _hitl_enabled():
+        raise HTTPException(status_code=501, detail="HITL approvals not enabled (set ENABLE_HITL=true)")
+
+    from src.checkpoint import get_build_graph
+    from src.session.search import get_shared_index
+
+    svc = _get_approval_service()
+    if svc is None:
+        raise HTTPException(status_code=501, detail="HITL approvals not enabled (set ENABLE_HITL=true)")
+
+    try:
+        build = get_build_graph(skill_name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"skill {skill_name!r} has no pipeline.py")
+    except (AttributeError, ImportError) as exc:
+        raise HTTPException(status_code=500, detail=f"skill {skill_name!r} pipeline broken: {exc}")
+
+    index = get_shared_index()
+    graph = build(svc, index.db_path)
+
+    attempt_id = body.attempt_id or _uuid.uuid4().hex[:12]
+    run_dir = Path.home() / ".vibe-trading" / "runs" / attempt_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Register a formal Attempt row so pause/resume/reject callbacks can
+    # flip its status throughout the graph lifecycle.
+    session_svc = _get_session_service()
+    if session_svc is not None:
+        from src.session.models import Attempt, AttemptStatus
+        attempt_obj = Attempt(
+            attempt_id=attempt_id,
+            session_id=body.session_id,
+            status=AttemptStatus.RUNNING,
+            prompt=f"skill:{skill_name}",
+            run_dir=str(run_dir),
+        )
+        session_svc.store.create_attempt(attempt_obj)
+
+    initial: Dict[str, Any] = {
+        "run_dir": str(run_dir),
+        "skill_name": skill_name,
+        "session_id": body.session_id,
+        "attempt_id": attempt_id,
+        "current_checkpoint": None,
+        "last_artifact_paths": {},
+        "pending_payload": {},
+        "checkpoint_overrides": {},
+        "completed": False,
+        "rejected_at": None,
+    }
+    if body.initial_state:
+        initial.update(body.initial_state)
+
+    config = {"configurable": {"thread_id": attempt_id}}
+    try:
+        result = graph.invoke(initial, config=config)
+    except Exception as exc:
+        if session_svc is not None:
+            from src.session.models import AttemptStatus
+            from datetime import datetime as _dt
+            attempt_obj.status = AttemptStatus.FAILED
+            attempt_obj.error = str(exc)
+            attempt_obj.completed_at = _dt.now().isoformat()
+            session_svc.store.update_attempt(attempt_obj)
+        raise HTTPException(status_code=500, detail=f"graph invoke failed: {exc}")
+
+    next_pending = [
+        a for a in svc.list_pending(limit=200) if a.thread_id == attempt_id
+    ]
+    out: Dict[str, Any] = {
+        "attempt_id": attempt_id,
+        "session_id": body.session_id,
+        "skill_name": skill_name,
+        "run_dir": str(run_dir),
+    }
+    if next_pending:
+        # Graph paused — pause_callback already fired WAITING_USER on the Attempt
+        # (if a session_id was provided and a matching Attempt exists).
+        out["status"] = "paused"
+        out["next_approval_id"] = next_pending[0].approval_id
+        out["next_checkpoint_id"] = next_pending[0].checkpoint_id
+    elif result and result.get("rejected_at"):
+        out["status"] = "terminated"
+    else:
+        out["status"] = "completed"
+        out["final_state"] = {k: v for k, v in (result or {}).items() if k != "pending_payload"}
+    return out
+
+
+# ============================================================================
 # File Upload
 # ============================================================================
 
@@ -1647,6 +1969,180 @@ async def cancel_swarm_run(run_id: str):
     if not ok:
         raise HTTPException(status_code=404, detail=f"No active run {run_id}")
     return {"status": "cancelled"}
+
+
+# ============================================================================
+# Live Deployment Endpoints
+# ============================================================================
+
+# In-process table mapping deployment_id → subprocess.Popen
+# Populated on startup from the registry (for restarts) and on POST /deploy.
+_live_processes: Dict[str, Any] = {}
+
+
+def _get_registry():
+    """Lazy import to avoid circular at module load."""
+    try:
+        from live.deployment_registry import get_registry
+        return get_registry()
+    except Exception:
+        return None
+
+
+@app.post("/deploy", dependencies=[Depends(require_auth)])
+async def deploy_strategy_endpoint(body: Dict[str, Any] = Body(...)):
+    """Deploy a gate-approved strategy to paper trading.
+
+    Delegates to DeployStrategyTool so validation and process-forking logic
+    lives in one place.
+    """
+    try:
+        from src.tools.deploy_strategy_tool import DeployStrategyTool
+        result = DeployStrategyTool().execute(**body)
+        payload = json.loads(result)
+        if payload.get("status") == "error":
+            raise HTTPException(status_code=400, detail=payload["error"])
+        # Register the forked process in our in-process table
+        pid = payload.get("pid")
+        if pid:
+            _live_processes[payload["deployment_id"]] = {"pid": pid}
+        return payload
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/live", dependencies=[Depends(require_auth)])
+async def list_live_deployments(state: Optional[str] = None):
+    """List all deployments, optionally filtered by state."""
+    try:
+        from src.tools.list_live_tool import ListLiveTool
+        kwargs = {"state": state} if state else {}
+        return json.loads(ListLiveTool().execute(**kwargs))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/live/portfolio", dependencies=[Depends(require_auth)])
+async def portfolio_risk_endpoint():
+    """Portfolio-level risk snapshot across all active deployments."""
+    try:
+        from src.tools.portfolio_risk_tool import PortfolioRiskTool
+        return json.loads(PortfolioRiskTool().execute())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/live/{deployment_id}", dependencies=[Depends(require_auth)])
+async def get_deployment(deployment_id: str):
+    """Get a single deployment's detail + heartbeat."""
+    reg = _get_registry()
+    if reg is None:
+        raise HTTPException(status_code=503, detail="Deployment registry unavailable")
+    with reg:
+        record = reg.get(deployment_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Deployment {deployment_id!r} not found")
+    from dataclasses import asdict
+    return asdict(record)
+
+
+@app.get("/live/{deployment_id}/heartbeat", dependencies=[Depends(require_auth)])
+async def deployment_heartbeat(deployment_id: str):
+    """Last heartbeat + kill-switch status for a deployment."""
+    reg = _get_registry()
+    if reg is None:
+        raise HTTPException(status_code=503, detail="Deployment registry unavailable")
+    with reg:
+        record = reg.get(deployment_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Deployment {deployment_id!r} not found")
+    return {
+        "deployment_id": deployment_id,
+        "state": record.state,
+        "last_heartbeat": record.last_heartbeat,
+        "pnl_realized": record.pnl_realized,
+        "n_trades": record.n_trades,
+    }
+
+
+@app.post("/live/{deployment_id}/halt", dependencies=[Depends(require_auth)])
+async def halt_deployment(deployment_id: str, body: Dict[str, Any] = Body(default={})):
+    """Halt a running deployment."""
+    try:
+        from src.tools.halt_strategy_tool import HaltStrategyTool
+        reason = body.get("reason", "api_halt")
+        result = json.loads(HaltStrategyTool().execute(deployment_id=deployment_id, reason=reason))
+        if result.get("status") == "error":
+            raise HTTPException(status_code=400, detail=result["error"])
+        _live_processes.pop(deployment_id, None)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/live/{deployment_id}/promote", dependencies=[Depends(require_auth)])
+async def promote_to_live_endpoint(deployment_id: str, body: Dict[str, Any] = Body(...)):
+    """Initiate HITL approval for paper → live promotion."""
+    rationale = body.get("rationale", "")
+    if not rationale:
+        raise HTTPException(status_code=400, detail="rationale is required")
+    try:
+        from src.tools.promote_to_live_tool import PromoteToLiveTool
+        result = json.loads(PromoteToLiveTool().execute(
+            deployment_id=deployment_id, rationale=rationale,
+        ))
+        if result.get("status") == "error":
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/live/{deployment_id}/promote/decide", dependencies=[Depends(require_auth)])
+async def decide_live_promotion(deployment_id: str, body: Dict[str, Any] = Body(...)):
+    """Human decision on a live-promotion request (approved true/false)."""
+    approved = body.get("approved")
+    if approved is None:
+        raise HTTPException(status_code=400, detail="approved (bool) is required")
+
+    reg = _get_registry()
+    if reg is None:
+        raise HTTPException(status_code=503, detail="Deployment registry unavailable")
+
+    with reg:
+        record = reg.get(deployment_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"Deployment {deployment_id!r} not found")
+        if record.state != "PENDING_APPROVAL":
+            raise HTTPException(status_code=400, detail=f"Deployment is in state {record.state!r}, not PENDING_APPROVAL")
+
+        if approved:
+            # Re-fork the runner with paper=False
+            import os as _os, sys as _sys, subprocess as _sp
+            from pathlib import Path as _Path
+            agent_root = _Path(__file__).parent
+            cadence = record.cadence
+            runner_module = "live.async_live_runner" if cadence == "intraday" else "live.live_runner"
+            env = {**_os.environ, "PYTHONPATH": str(agent_root), "ALPACA_PAPER": "false"}
+            proc = _sp.Popen(
+                [_sys.executable, "-m", runner_module, deployment_id],
+                cwd=str(agent_root), env=env,
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+            reg.update_state(deployment_id, "LIVE")
+            reg.update_pid(deployment_id, proc.pid)
+            _live_processes[deployment_id] = {"pid": proc.pid}
+            return {"status": "ok", "state": "LIVE", "pid": proc.pid}
+        else:
+            reason = body.get("reason", "rejected_by_human")
+            reg.update_state(deployment_id, "PAPER", rejection_reason=reason)
+            return {"status": "ok", "state": "PAPER", "note": "Promotion rejected; strategy remains on paper."}
 
 
 # ============================================================================

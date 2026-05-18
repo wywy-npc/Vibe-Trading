@@ -1723,6 +1723,54 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("init", help="Interactive setup: create ~/.vibe-trading/.env")
 
+    # Live deployment subcommands
+    deploy_parser = subparsers.add_parser("deploy", help="Deploy a gate-approved strategy to paper trading")
+    deploy_parser.add_argument("run_dir", help="Path to the strategy run directory (must have passing gates.json)")
+    deploy_parser.add_argument("--broker", choices=["alpaca", "ibkr"], default="alpaca")
+    deploy_parser.add_argument("--symbols", nargs="+", required=True, help="Symbols to trade")
+    deploy_parser.add_argument("--interval", default="1D", help="Data interval (1D, 1H, 5Min, etc.)")
+    deploy_parser.add_argument("--cadence", choices=["daily", "intraday"], default="daily")
+    deploy_parser.add_argument("--max-drawdown-pct", type=float, default=10.0, dest="max_drawdown_pct")
+    deploy_parser.add_argument("--daily-loss-pct", type=float, default=2.0, dest="daily_loss_pct")
+    deploy_parser.add_argument("--name", dest="strategy_name", help="Human-readable strategy name")
+
+    live_parser = subparsers.add_parser("live", help="Manage live/paper deployments")
+    live_sub = live_parser.add_subparsers(dest="live_command")
+    live_ls = live_sub.add_parser("ls", help="List deployments")
+    live_ls.add_argument("--state", choices=["PAPER", "LIVE", "HALTED", "PENDING_APPROVAL", "all"], default="all")
+    live_show = live_sub.add_parser("show", help="Show deployment detail")
+    live_show.add_argument("deployment_id")
+    live_halt = live_sub.add_parser("halt", help="Halt a running deployment")
+    live_halt.add_argument("deployment_id")
+    live_halt.add_argument("--reason", default="manual_halt")
+    live_promote = live_sub.add_parser("promote", help="Propose paper → live promotion (HITL)")
+    live_promote.add_argument("deployment_id")
+    live_promote.add_argument("--rationale", required=True, help="Why this strategy should go live")
+    live_remote = live_sub.add_parser("deploy-remote", help="Push deployment to remote server via SSH")
+    live_remote.add_argument("deployment_id")
+    live_remote.add_argument("--host", default=None)
+    live_remote.add_argument("--user", default=None)
+    live_remote.add_argument("--key", dest="key_path", default=None)
+    live_portfolio = live_sub.add_parser("portfolio", help="Combined portfolio risk view")
+    live_portfolio.add_argument("--max-dd", type=float, default=15.0, dest="portfolio_max_dd")
+
+    skill_parser = subparsers.add_parser(
+        "skill",
+        help="Run a HITL skill through its checkpoint graph (no server needed)",
+    )
+    skill_parser.add_argument("skill_name", help="Skill name, e.g. thesis-to-rules")
+    skill_parser.add_argument(
+        "--session-id",
+        dest="skill_session_id",
+        help="Attach to an existing session (auto-creates one if omitted)",
+    )
+    skill_parser.add_argument(
+        "--initial-state",
+        dest="skill_initial_state",
+        metavar="JSON",
+        help="JSON dict of extra initial GraphState fields (e.g. seed payload)",
+    )
+
     return parser
 
 
@@ -2022,6 +2070,332 @@ def cmd_init() -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# HITL skill runner
+# ---------------------------------------------------------------------------
+
+def cmd_skill_run(skill_name: str, session_id: Optional[str] = None, initial_state_json: Optional[str] = None) -> int:
+    """Run a HITL skill graph in-process, prompting the PM at each checkpoint."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    # Lazy imports so the HITL deps aren't required for the rest of the CLI.
+    try:
+        from src.checkpoint import ApprovalService, DecisionAction, get_build_graph
+        from src.session.search import get_shared_index
+    except ImportError as e:
+        console.print(f"[red]HITL deps missing — run: pip install langgraph langgraph-checkpoint-sqlite[/red]\n{e}")
+        return 1
+
+    try:
+        build = get_build_graph(skill_name)
+    except FileNotFoundError:
+        console.print(f"[red]Skill {skill_name!r} has no pipeline.py. Only skills with a checkpoint graph can be run with 'skill' subcommand.[/red]")
+        return 1
+
+    # Session setup.
+    from src.session.store import SessionStore
+    from src.session.models import Attempt, AttemptStatus, Session
+    import uuid as _uuid
+
+    store = SessionStore(base_dir=SESSIONS_DIR)
+    if session_id:
+        session = store.get_session(session_id)
+        if session is None:
+            console.print(f"[red]Session {session_id!r} not found.[/red]")
+            return 1
+    else:
+        session = Session(title=f"skill:{skill_name}")
+        store.create_session(session)
+        session_id = session.session_id
+        console.print(f"[dim]Created session {session_id}[/dim]")
+
+    attempt_id = _uuid.uuid4().hex[:12]
+    run_dir = _Path.home() / ".vibe-trading" / "runs" / attempt_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Register Attempt so status callbacks work.
+    attempt = Attempt(
+        attempt_id=attempt_id,
+        session_id=session_id,
+        status=AttemptStatus.RUNNING,
+        prompt=f"skill:{skill_name}",
+        run_dir=str(run_dir),
+    )
+    store.create_attempt(attempt)
+
+    index = get_shared_index()
+
+    def _on_pause(approval) -> None:
+        _a = store.get_attempt(session_id, attempt_id)
+        if _a:
+            _a.status = AttemptStatus.WAITING_USER
+            store.update_attempt(_a)
+
+    def _on_reject(approval) -> None:
+        _a = store.get_attempt(session_id, attempt_id)
+        if _a:
+            _a.status = AttemptStatus.FAILED
+            _a.error = f"rejected at checkpoint:{approval.checkpoint_id}"
+            store.update_attempt(_a)
+
+    svc = ApprovalService(
+        index.connection,
+        pause_callback=_on_pause,
+        reject_callback=_on_reject,
+    )
+    graph = build(svc, index.db_path)
+
+    from langgraph.types import Command
+
+    initial: dict = {
+        "run_dir": str(run_dir),
+        "skill_name": skill_name,
+        "session_id": session_id,
+        "attempt_id": attempt_id,
+        "current_checkpoint": None,
+        "last_artifact_paths": {},
+        "pending_payload": {},
+        "checkpoint_overrides": {},
+        "completed": False,
+        "rejected_at": None,
+    }
+    if initial_state_json:
+        try:
+            initial.update(_json.loads(initial_state_json))
+        except _json.JSONDecodeError as e:
+            console.print(f"[red]--initial-state must be valid JSON: {e}[/red]")
+            return 1
+
+    console.print(Panel(
+        f"[bold cyan]Skill:[/bold cyan] {skill_name}\n"
+        f"[dim]session: {session_id} | attempt: {attempt_id}[/dim]",
+        border_style="cyan",
+    ))
+
+    config = {"configurable": {"thread_id": attempt_id}}
+    result = graph.invoke(initial, config=config)
+
+    while True:
+        pending = [a for a in svc.list_pending() if a.thread_id == attempt_id]
+        if not pending:
+            break
+        ap = pending[0]
+
+        # Display the checkpoint.
+        console.print()
+        console.print(Panel(
+            f"[bold yellow]Checkpoint:[/bold yellow] {ap.checkpoint_id}\n"
+            + (f"[dim]{ap.prompt}[/dim]" if ap.prompt else ""),
+            border_style="yellow",
+        ))
+        console.print("[bold]Payload:[/bold]")
+        console.print_json(_json.dumps(ap.payload, indent=2))
+        if ap.allowed_edits:
+            console.print(f"[dim]Editable fields: {', '.join(ap.allowed_edits)}[/dim]")
+        console.print(f"[dim]Actions: {', '.join(d.value for d in ap.decision_types)}[/dim]")
+        console.print()
+        console.print("[dim]Enter action: [bold]a[/bold]pprove  [bold]r[/bold]eject  [bold]m[/bold]odify <json>  [bold]d[/bold]efer <condition>[/dim]")
+
+        try:
+            raw = Prompt.ask("[bold]Decision[/bold]").strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[yellow]Interrupted — run remains paused.[/yellow]")
+            return 0
+
+        parts = raw.split(None, 1)
+        cmd_char = parts[0].lower() if parts else ""
+        tail = parts[1] if len(parts) > 1 else ""
+
+        action_map = {"a": "approve", "approve": "approve",
+                      "r": "reject",  "reject": "reject",
+                      "m": "modify",  "modify": "modify",
+                      "d": "defer",   "defer": "defer"}
+        action_str = action_map.get(cmd_char)
+        if not action_str:
+            console.print(f"[red]Unknown action {cmd_char!r}. Use a/r/m/d.[/red]")
+            continue
+
+        try:
+            action = DecisionAction(action_str)
+        except ValueError:
+            console.print(f"[red]{action_str!r} not in this checkpoint's decision_types.[/red]")
+            continue
+
+        edits: dict = {}
+        defer_cond: Optional[str] = None
+        if action == DecisionAction.MODIFY:
+            if not tail:
+                console.print("[red]modify requires a JSON edits argument, e.g.: m {\"time_horizon\": \"6mo\"}[/red]")
+                continue
+            try:
+                edits = _json.loads(tail)
+            except _json.JSONDecodeError as e:
+                console.print(f"[red]Invalid JSON: {e}[/red]")
+                continue
+        elif action == DecisionAction.DEFER:
+            defer_cond = tail or None
+
+        reason_input = Prompt.ask("[dim]Reason (optional, Enter to skip)[/dim]", default="").strip() or None
+
+        try:
+            svc.submit_decision(
+                ap.approval_id,
+                action,
+                edits=edits or None,
+                reason=reason_input,
+                defer_condition=defer_cond,
+                decided_by="cli",
+            )
+        except Exception as e:
+            console.print(f"[red]Decision failed: {e}[/red]")
+            continue
+
+        if action == DecisionAction.REJECT:
+            console.print("[red]Run terminated.[/red]")
+            return 0
+
+        # Resume the graph.
+        result = graph.invoke(
+            Command(resume={"action": action_str, "edits": edits}),
+            config=config,
+        )
+
+    # No pending approvals — graph finished.
+    if result and result.get("rejected_at"):
+        console.print(f"\n[red]Graph terminated at {result['rejected_at']}.[/red]")
+        return 1
+
+    _a = store.get_attempt(session_id, attempt_id)
+    if _a:
+        from datetime import datetime as _dt
+        _a.status = AttemptStatus.COMPLETED
+        _a.completed_at = _dt.now().isoformat()
+        store.update_attempt(_a)
+
+    console.print(f"\n[green]✅ Skill {skill_name!r} completed. Attempt: {attempt_id}[/green]")
+    return 0
+
+
+def _cmd_deploy(args) -> int:
+    """Deploy a gate-approved strategy to paper trading."""
+    import json
+    from src.tools.deploy_strategy_tool import DeployStrategyTool
+
+    kwargs = {
+        "run_dir": args.run_dir,
+        "broker": args.broker,
+        "symbols": args.symbols,
+        "interval": args.interval,
+        "cadence": args.cadence,
+        "max_drawdown_pct": args.max_drawdown_pct,
+        "daily_loss_pct": args.daily_loss_pct,
+    }
+    if args.strategy_name:
+        kwargs["strategy_name"] = args.strategy_name
+
+    result = json.loads(DeployStrategyTool().execute(**kwargs))
+    if result.get("status") == "error":
+        console.print(f"[red]Deploy failed:[/red] {result['error']}")
+        return 1
+    console.print(f"[green]Deployed![/green] deployment_id=[bold]{result['deployment_id']}[/bold] state=PAPER pid={result.get('pid')}")
+    console.print(f"  Monitor: vibe-trading live ls")
+    console.print(f"  Halt:    vibe-trading live halt {result['deployment_id']}")
+    console.print(f"  Promote: vibe-trading live promote {result['deployment_id']} --rationale '...'")
+    return 0
+
+
+def _cmd_live(args) -> int:
+    """Handle all 'live' subcommands."""
+    import json
+
+    live_command = getattr(args, "live_command", None)
+
+    if live_command == "ls":
+        from src.tools.list_live_tool import ListLiveTool
+        state = args.state if args.state != "all" else None
+        kwargs = {"state": state} if state else {}
+        result = json.loads(ListLiveTool().execute(**kwargs))
+        deployments = result.get("deployments", [])
+        if not deployments:
+            console.print("[dim]No deployments found[/dim]")
+            return 0
+        for d in deployments:
+            age = d.get("heartbeat_age_seconds")
+            age_str = f"{age}s ago" if age is not None else "—"
+            state_color = {"PAPER": "cyan", "LIVE": "green", "HALTED": "red", "PENDING_APPROVAL": "yellow"}.get(d["state"], "white")
+            console.print(
+                f"[bold {state_color}]{d['state']:18}[/bold {state_color}] "
+                f"[bold]{d['deployment_id']}[/bold] {d['strategy_name']} "
+                f"broker={d['broker']} symbols={d['symbols']} "
+                f"pnl=${d['pnl_realized']:.2f} trades={d['n_trades']} heartbeat={age_str}"
+            )
+        return 0
+
+    if live_command == "show":
+        from live.deployment_registry import get_registry
+        with get_registry() as reg:
+            record = reg.get(args.deployment_id)
+        if record is None:
+            console.print(f"[red]Not found:[/red] {args.deployment_id}")
+            return 1
+        import dataclasses
+        console.print_json(json.dumps(dataclasses.asdict(record), default=str))
+        return 0
+
+    if live_command == "halt":
+        from src.tools.halt_strategy_tool import HaltStrategyTool
+        result = json.loads(HaltStrategyTool().execute(deployment_id=args.deployment_id, reason=args.reason))
+        if result.get("status") == "error":
+            console.print(f"[red]Halt failed:[/red] {result['error']}")
+            return 1
+        console.print(f"[green]Halted[/green] {args.deployment_id} pnl=${result.get('pnl_realized', 0):.2f}")
+        return 0
+
+    if live_command == "promote":
+        from src.tools.promote_to_live_tool import PromoteToLiveTool
+        result = json.loads(PromoteToLiveTool().execute(deployment_id=args.deployment_id, rationale=args.rationale))
+        if result.get("status") == "error":
+            console.print(f"[red]Promote failed:[/red] {result['error']}")
+            return 1
+        console.print(f"[yellow]Pending approval[/yellow] {args.deployment_id}")
+        console.print(f"  Approve: POST /live/{args.deployment_id}/promote/decide {{\"approved\": true}}")
+        return 0
+
+    if live_command == "deploy-remote":
+        from src.tools.deploy_to_server_tool import DeployToServerTool
+        kwargs = {"deployment_id": args.deployment_id}
+        if args.host:
+            kwargs["host"] = args.host
+        if args.user:
+            kwargs["user"] = args.user
+        if args.key_path:
+            kwargs["key_path"] = args.key_path
+        result = json.loads(DeployToServerTool().execute(**kwargs))
+        if result.get("status") == "error":
+            console.print(f"[red]Remote deploy failed:[/red] {result['error']}")
+            return 1
+        console.print(f"[green]Remote deploy:[/green] host={result['remote_host']} pid={result['remote_pid']}")
+        console.print(f"  Log: ssh {result['remote_host']} tail -f {result['log_path']}")
+        return 0
+
+    if live_command == "portfolio":
+        from src.tools.portfolio_risk_tool import PortfolioRiskTool
+        result = json.loads(PortfolioRiskTool().execute(portfolio_max_drawdown_pct=args.portfolio_max_dd))
+        snap = result.get("snapshot", {})
+        breach = snap.get("portfolio_max_dd_breach", False)
+        color = "red" if breach else "green"
+        console.print(f"[bold]Portfolio snapshot[/bold]  active={snap.get('n_active')} total_pnl=${snap.get('total_pnl_realized', 0):.2f}")
+        console.print(f"  combined_drawdown: [{color}]{snap.get('combined_drawdown', 0):.2%}[/{color}]  breach={breach}")
+        for dep_id, pnl in (snap.get("per_strategy_pnl") or {}).items():
+            state = (snap.get("per_strategy_state") or {}).get(dep_id, "?")
+            console.print(f"  {dep_id[:30]:30} {state:20} pnl=${pnl:.2f}")
+        return 0
+
+    console.print("[red]live requires a subcommand:[/red] ls | show | halt | promote | deploy-remote | portfolio")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint returning a process exit code."""
     raw_argv = list(sys.argv[1:] if argv is None else argv)
@@ -2031,6 +2405,16 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return int(exc.code) if isinstance(exc.code, int) else EXIT_USAGE_ERROR
 
+    if args.command == "deploy":
+        return _cmd_deploy(args)
+    if args.command == "live":
+        return _cmd_live(args)
+    if args.command == "skill":
+        return cmd_skill_run(
+            args.skill_name,
+            session_id=getattr(args, "skill_session_id", None),
+            initial_state_json=getattr(args, "skill_initial_state", None),
+        )
     if args.command == "init":
         return cmd_init()
     if args.command == "serve":

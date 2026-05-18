@@ -112,7 +112,7 @@ def load_skill(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool
-def backtest(run_dir: str) -> str:
+def backtest(run_dir: str, critic_verdict: dict | None = None) -> str:
     """Run a vectorized backtest using config.json and code/signal_engine.py.
 
     The run_dir must contain:
@@ -127,13 +127,161 @@ def backtest(run_dir: str) -> str:
     - "ccxt": crypto from 100+ exchanges (free, no API key)
     - "auto": auto-detect based on symbol format (with fallback)
 
-    Returns metrics (Sharpe, return, drawdown, etc.) and artifact paths.
+    Emits gates.json alongside the engine artifacts; the ai-quant-lab gate
+    stack (Deflated Sharpe / correlation / PCA / critic) fires automatically
+    in the runner post-hook regardless of engine.
 
     Args:
         run_dir: Path to the run directory containing config.json and code/.
+        critic_verdict: Optional verdict dict from a prior `critique` call,
+            persisted into config.json for the post-engine gate hook.
     """
     from src.tools.backtest_tool import run_backtest
-    return run_backtest(run_dir)
+    return run_backtest(run_dir, critic_verdict)
+
+
+# ---------------------------------------------------------------------------
+# ai-quant-lab integration tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def research_loop(
+    market_description: str,
+    market_type: str,
+    symbol: str,
+    data_source: str,
+    start_date: str,
+    end_date: str,
+    interval: str = "1D",
+    iterations: int = 50,
+    target_survivors: int = 3,
+    cost_bps: float = 8.0,
+    annualization: int = 252,
+) -> str:
+    """Run ai-quant-lab's full deterministic strategy-discovery loop.
+
+    Hypothesis → Critic → Code → Sandbox → vectorized backtest → Deflated-Sharpe
+    / correlation / PCA gates → ResearchMemory. The gate sequence is enforced
+    by Python (not the LLM), so the hard-gate guarantee holds.
+
+    Args:
+        market_description: 1-2 sentences describing the universe.
+        market_type: One of equities/crypto/futures/options/fx/generic.
+        symbol: Single Vibe-Trading code (e.g. 'SPY.US', 'BTC-USDT').
+        data_source: Loader id (tushare/yfinance/okx/akshare/ccxt).
+        start_date: YYYY-MM-DD.
+        end_date: YYYY-MM-DD.
+        interval: Bar interval (default '1D').
+        iterations: Max loop iterations.
+        target_survivors: Stop early once this many strategies clear the gates.
+        cost_bps: Per-trade transaction cost in basis points.
+        annualization: Bars per year for Sharpe annualization.
+    """
+    from src.tools.research_loop_tool import ResearchLoopTool
+    return ResearchLoopTool().execute(
+        market_description=market_description,
+        market_type=market_type,
+        symbol=symbol,
+        data_source=data_source,
+        start_date=start_date,
+        end_date=end_date,
+        interval=interval,
+        iterations=iterations,
+        target_survivors=target_survivors,
+        cost_bps=cost_bps,
+        annualization=annualization,
+    )
+
+
+@mcp.tool
+def critique(
+    title: str,
+    rationale: str,
+    spec: str,
+    market_type: str,
+    expected_sharpe_low: float = 0.3,
+    expected_sharpe_high: float = 0.8,
+    works_in_regime: str = "",
+    breaks_in_regime: str = "",
+) -> str:
+    """Adversarial pre-backtest review of a trading hypothesis.
+
+    Returns a pass|kill verdict with reasoning. Bias is to kill — passing
+    means the idea is not obviously broken. Records a trial so the deflated-
+    Sharpe gate's n_trials stays honest.
+
+    Args:
+        title: One-line description of the idea.
+        rationale: 2-4 sentences citing the market-microstructure reason.
+        spec: Precise signal/direction/holding-period spec.
+        market_type: equities/crypto/futures/options/fx/generic.
+        expected_sharpe_low: Honest low end of expected Sharpe.
+        expected_sharpe_high: Honest high end of expected Sharpe.
+        works_in_regime: Regime where edge should exist.
+        breaks_in_regime: Regime where edge will die.
+    """
+    from src.tools.critique_tool import CritiqueTool
+    return CritiqueTool().execute(
+        title=title,
+        rationale=rationale,
+        spec=spec,
+        market_type=market_type,
+        expected_sharpe_low=expected_sharpe_low,
+        expected_sharpe_high=expected_sharpe_high,
+        works_in_regime=works_in_regime,
+        breaks_in_regime=breaks_in_regime,
+    )
+
+
+@mcp.tool
+def validate_run(
+    run_dir: str,
+    annualization: int | None = None,
+    allow_non_loop: bool = False,
+) -> str:
+    """Re-evaluate ai-quant-lab gates against a finished run without re-running the engine.
+
+    Strict by default: refuses runs not produced by ``research_loop`` (no
+    ``loop_run_id`` in config.json). Useful when n_trials has grown (Deflated
+    Sharpe gets stricter) or after new survivors have been accepted. Emits a
+    fresh gates.json.
+
+    Args:
+        run_dir: Path to a run directory containing artifacts/equity.csv.
+        annualization: Bars per year for Sharpe annualization (default 252).
+        allow_non_loop: Override the hard-gate invariant and re-evaluate a
+            run that was not produced by research_loop. Default false.
+    """
+    from src.tools.validate_run_tool import ValidateRunTool
+    kwargs: dict = {"run_dir": run_dir, "allow_non_loop": allow_non_loop}
+    if annualization is not None:
+        kwargs["annualization"] = annualization
+    return ValidateRunTool().execute(**kwargs)
+
+
+@mcp.tool
+def leakage_scan(
+    run_dir: str,
+    future_horizon: int = 1,
+    suspicious_future_correlation: float = 0.20,
+) -> str:
+    """Look-ahead-bias audit on a finished run.
+
+    Compares position correlation with future vs past returns. Catches centered
+    rolling windows, forgotten .shift(1) calls, and forward-reference leaks.
+
+    Args:
+        run_dir: Path to a run directory with artifacts/positions.csv and equity.csv.
+        future_horizon: Bars forward to compare against (default 1).
+        suspicious_future_correlation: |future-corr| above this independently
+            flags a column (default 0.20).
+    """
+    from src.tools.leakage_scan_tool import LeakageScanTool
+    return LeakageScanTool().execute(
+        run_dir=run_dir,
+        future_horizon=future_horizon,
+        suspicious_future_correlation=suspicious_future_correlation,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -691,6 +839,127 @@ def scan_shadow_signals(
     if date:
         params["date"] = date
     return registry.execute("scan_shadow_signals", params)
+
+
+# ---------------------------------------------------------------------------
+# Live deployment tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def deploy_strategy(
+    run_dir: str,
+    broker: str,
+    symbols: list[str],
+    interval: str = "1D",
+    cadence: str = "daily",
+    max_drawdown_pct: float = 10.0,
+    daily_loss_pct: float = 2.0,
+    strategy_name: str | None = None,
+) -> str:
+    """Deploy a gate-approved strategy to paper trading.
+
+    Validates gates.json passes=true and survivor status, then forks the
+    appropriate live_runner (daily) or async_live_runner (intraday).
+
+    Args:
+        run_dir: Path to the strategy run directory.
+        broker: Execution broker (alpaca | ibkr).
+        symbols: Symbols to trade.
+        interval: Data interval (1D, 1H, 5Min).
+        cadence: Execution cadence (daily | intraday).
+        max_drawdown_pct: Kill-switch drawdown limit %.
+        daily_loss_pct: Kill-switch daily loss limit %.
+        strategy_name: Optional human-readable name.
+    """
+    from src.tools.deploy_strategy_tool import DeployStrategyTool
+    kwargs = {"run_dir": run_dir, "broker": broker, "symbols": symbols,
+              "interval": interval, "cadence": cadence,
+              "max_drawdown_pct": max_drawdown_pct, "daily_loss_pct": daily_loss_pct}
+    if strategy_name:
+        kwargs["strategy_name"] = strategy_name
+    return DeployStrategyTool().execute(**kwargs)
+
+
+@mcp.tool
+def list_live(state: str | None = None) -> str:
+    """List paper and live strategy deployments.
+
+    Args:
+        state: Filter by state (PAPER|LIVE|HALTED|PENDING_APPROVAL). None = all.
+    """
+    from src.tools.list_live_tool import ListLiveTool
+    kwargs = {"state": state} if state else {}
+    return ListLiveTool().execute(**kwargs)
+
+
+@mcp.tool
+def halt_strategy(deployment_id: str, reason: str = "manual_halt") -> str:
+    """Halt a running strategy deployment.
+
+    Args:
+        deployment_id: The deployment to halt.
+        reason: Reason for halting (logged in registry).
+    """
+    from src.tools.halt_strategy_tool import HaltStrategyTool
+    return HaltStrategyTool().execute(deployment_id=deployment_id, reason=reason)
+
+
+@mcp.tool
+def promote_to_live(deployment_id: str, rationale: str) -> str:
+    """Propose a paper deployment for live trading (requires HITL approval).
+
+    NEVER auto-promotes. Returns instructions for the human to approve/reject.
+
+    Args:
+        deployment_id: The PAPER deployment to promote.
+        rationale: Why this strategy should go live (required).
+    """
+    from src.tools.promote_to_live_tool import PromoteToLiveTool
+    return PromoteToLiveTool().execute(deployment_id=deployment_id, rationale=rationale)
+
+
+@mcp.tool
+def deploy_to_server(
+    deployment_id: str,
+    host: str | None = None,
+    user: str | None = None,
+    key_path: str | None = None,
+    remote_base: str = "~/vibe-strategies",
+) -> str:
+    """SSH-deploy a strategy to a remote server (EC2, VPS, etc.).
+
+    Rsyncs run_dir + live/ modules, installs deps, starts runner with nohup.
+
+    Args:
+        deployment_id: The deployment to push.
+        host: Remote host (overrides VIBE_DEPLOY_HOST env var).
+        user: SSH user (overrides VIBE_DEPLOY_USER).
+        key_path: SSH key path (overrides VIBE_DEPLOY_KEY).
+        remote_base: Remote base directory.
+    """
+    from src.tools.deploy_to_server_tool import DeployToServerTool
+    kwargs: dict = {"deployment_id": deployment_id, "remote_base": remote_base}
+    if host:
+        kwargs["host"] = host
+    if user:
+        kwargs["user"] = user
+    if key_path:
+        kwargs["key_path"] = key_path
+    return DeployToServerTool().execute(**kwargs)
+
+
+@mcp.tool
+def portfolio_risk(portfolio_max_drawdown_pct: float = 15.0) -> str:
+    """Portfolio-level risk snapshot across all active deployments.
+
+    Returns combined PnL, drawdown, per-strategy breakdown, and return
+    correlation matrix.
+
+    Args:
+        portfolio_max_drawdown_pct: Portfolio drawdown limit threshold %.
+    """
+    from src.tools.portfolio_risk_tool import PortfolioRiskTool
+    return PortfolioRiskTool().execute(portfolio_max_drawdown_pct=portfolio_max_drawdown_pct)
 
 
 # ---------------------------------------------------------------------------
